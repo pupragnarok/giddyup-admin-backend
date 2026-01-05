@@ -1,0 +1,238 @@
+#!/bin/bash
+
+set -e
+
+echo “🤠 Giddyup Admin Console - Installation Script”
+echo “==================================================”
+echo “”
+
+# Color codes
+
+GREEN=’\033[0;32m’
+YELLOW=’\033[1;33m’
+RED=’\033[0;31m’
+NC=’\033[0m’ # No Color
+
+# Check if running as root
+
+if [ “$EUID” -ne 0 ]; then
+echo -e “${RED}Please run as root or with sudo${NC}”
+exit 1
+fi
+
+# Check for required commands
+
+command -v docker >/dev/null 2>&1 || { echo -e “${RED}Docker is required but not installed. Aborting.${NC}” >&2; exit 1; }
+command -v docker-compose >/dev/null 2>&1 || command -v docker compose >/dev/null 2>&1 || { echo -e “${RED}Docker Compose is required but not installed. Aborting.${NC}” >&2; exit 1; }
+
+# Prompt for domain
+
+echo -e “${YELLOW}Enter your domain for the admin console (e.g., admin.giddyup.cloud):${NC}”
+read -p “Domain: “ DOMAIN
+
+if [ -z “$DOMAIN” ]; then
+echo -e “${RED}Domain cannot be empty. Aborting.${NC}”
+exit 1
+fi
+
+echo “”
+echo -e “${GREEN}Installing to: /opt/giddyup-admin${NC}”
+echo -e “${GREEN}Domain: $DOMAIN${NC}”
+echo “”
+
+# Stop and remove existing container if running
+
+echo “⏹️  Stopping any existing containers…”
+cd /opt/giddyup-admin 2>/dev/null && docker-compose down 2>/dev/null || true
+docker rm -f giddyup-admin-console 2>/dev/null || true
+
+# Clean up and recreate directory structure
+
+echo “🧹 Cleaning up old files…”
+rm -rf /opt/giddyup-admin
+mkdir -p /opt/giddyup-admin/app/src
+
+echo “📝 Creating configuration files…”
+
+# Create docker-compose.yml
+
+cat > /opt/giddyup-admin/docker-compose.yml << EOF
+version: ‘3.8’
+
+services:
+giddyup-admin:
+image: node:18-alpine
+container_name: giddyup-admin-console
+working_dir: /app
+volumes:
+- ./app:/app
+- /var/run/docker.sock:/var/run/docker.sock:ro
+environment:
+- NODE_ENV=production
+command: sh -c “npm install && npm run build && npx serve -s dist -l 3000”
+networks:
+- traefik_network
+labels:
+- “traefik.enable=true”
+- “traefik.http.routers.giddyup-admin.rule=Host(\`${DOMAIN}\`)”
+- “traefik.http.routers.giddyup-admin.entrypoints=web”
+- “traefik.http.routers.giddyup-admin.middlewares=redirect-to-https”
+- “traefik.http.routers.giddyup-admin-secure.rule=Host(\`${DOMAIN}\`)”
+- “traefik.http.routers.giddyup-admin-secure.entrypoints=websecure”
+- “traefik.http.routers.giddyup-admin-secure.tls=true”
+- “traefik.http.routers.giddyup-admin-secure.tls.certresolver=letsencrypt”
+- “traefik.http.services.giddyup-admin.loadbalancer.server.port=3000”
+- “traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https”
+- “traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true”
+restart: unless-stopped
+
+networks:
+traefik_network:
+external: true
+EOF
+
+# Create package.json
+
+cat > /opt/giddyup-admin/app/package.json << ‘EOF’
+{
+“name”: “giddyup-admin-console”,
+“version”: “1.0.0”,
+“type”: “module”,
+“scripts”: {
+“dev”: “vite”,
+“build”: “vite build”,
+“preview”: “vite preview”
+},
+“dependencies”: {
+“react”: “^18.2.0”,
+“react-dom”: “^18.2.0”,
+“lucide-react”: “^0.263.1”
+},
+“devDependencies”: {
+“@vitejs/plugin-react”: “^4.0.0”,
+“vite”: “^4.3.9”,
+“serve”: “^14.2.0”
+}
+}
+EOF
+
+# Create vite.config.js
+
+cat > /opt/giddyup-admin/app/vite.config.js << ‘EOF’
+import { defineConfig } from ‘vite’
+import react from ‘@vitejs/plugin-react’
+
+export default defineConfig({
+plugins: [react()],
+server: {
+host: ‘0.0.0.0’,
+port: 3000
+}
+})
+EOF
+
+# Create index.html
+
+cat > /opt/giddyup-admin/app/index.html << ‘EOF’
+
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Giddyup Admin Console</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+EOF
+
+# Create main.jsx
+
+cat > /opt/giddyup-admin/app/src/main.jsx << ‘EOF’
+import React from ‘react’
+import ReactDOM from ‘react-dom/client’
+import App from ‘./App.jsx’
+
+ReactDOM.createRoot(document.getElementById(‘root’)).render(
+<React.StrictMode>
+<App />
+</React.StrictMode>,
+)
+EOF
+
+# Download App.jsx from GitHub
+
+echo “📥 Downloading App.jsx…”
+curl -sSL https://raw.githubusercontent.com/pupragnarok/giddyup-admin-backend/main/admin/app/src/App.jsx -o /opt/giddyup-admin/app/src/App.jsx
+
+if [ ! -f /opt/giddyup-admin/app/src/App.jsx ]; then
+echo -e “${RED}Failed to download App.jsx. Aborting.${NC}”
+exit 1
+fi
+
+echo “”
+echo -e “${GREEN}✅ All files created successfully!${NC}”
+echo “”
+
+# Display file structure
+
+echo “📁 Directory structure:”
+find /opt/giddyup-admin -type f | sort
+
+echo “”
+echo “🚀 Starting deployment…”
+cd /opt/giddyup-admin
+docker-compose up -d
+
+echo “”
+echo -e “${GREEN}✅ Deployment started!${NC}”
+echo “”
+echo “📊 Monitoring initial build (this may take 2-3 minutes)…”
+echo “   Press Ctrl+C to exit logs (container will keep running)”
+echo “”
+
+sleep 3
+docker logs -f giddyup-admin-console 2>&1 &
+LOGS_PID=$!
+
+# Wait for the build to complete or timeout after 5 minutes
+
+TIMEOUT=300
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+if docker logs giddyup-admin-console 2>&1 | grep -q “Accepting connections”; then
+echo “”
+echo -e “${GREEN}✅ Build complete! Server is running.${NC}”
+kill $LOGS_PID 2>/dev/null || true
+break
+fi
+sleep 5
+ELAPSED=$((ELAPSED + 5))
+done
+
+echo “”
+echo “━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━”
+echo -e “${GREEN}🎉 Installation Complete!${NC}”
+echo “━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━”
+echo “”
+echo “🌐 Access your admin console at:”
+echo -e “   ${GREEN}https://${DOMAIN}${NC}”
+echo “”
+echo “📝 Useful commands:”
+echo “   View logs:    docker logs -f giddyup-admin-console”
+echo “   Restart:      cd /opt/giddyup-admin && docker-compose restart”
+echo “   Stop:         cd /opt/giddyup-admin && docker-compose down”
+echo “   Rebuild:      cd /opt/giddyup-admin && docker-compose up -d –build”
+echo “”
+echo “⚠️  Remember to:”
+echo “   1. Add DNS A record: $DOMAIN → your-server-ip”
+echo “   2. Wait for DNS propagation (5-10 minutes)”
+echo “   3. Let’s Encrypt will automatically generate SSL certificate”
+echo “”
+echo “🤠 Happy wrangling!”
+echo “”
